@@ -7,7 +7,8 @@
  *   bun run build:binary --target bun-linux-arm64 [--target …]
  *   bun run build:binary --all                  # every release target
  *
- * Writes dist/bin/mcp-recall-<target>[.exe] and a .sha256 beside each. A
+ * Writes dist/bin/mcp-recall-<target>[.exe] and a SHA256SUMS covering the
+ * binaries this run built. A
  * cross-compiled target downloads that platform's Bun runtime the first time.
  */
 import { createHash } from "crypto";
@@ -54,15 +55,15 @@ function hostTarget(): string {
   return `bun-${os}-${process.arch}`;
 }
 
-function build(target: string, entry: string, outDir: string): string {
+/** Compiles one target; returns its path and its `sha256sum` line. */
+function build(target: string, entry: string, outDir: string): { outfile: string; sum: string } {
   const outfile = join(outDir, `mcp-recall-${target.replace(/^bun-/, "")}${target.includes("windows") ? ".exe" : ""}`);
   const p = Bun.spawnSync(["bun", "build", "--compile", "--minify", `--target=${target}`, entry, "--outfile", outfile], {
     cwd: root, stdout: "inherit", stderr: "inherit",
   });
   if (p.exitCode !== 0) throw new Error(`bun build --compile failed for ${target}`);
   const sha = createHash("sha256").update(readFileSync(outfile)).digest("hex");
-  writeFileSync(`${outfile}.sha256`, `${sha}  ${outfile.split("/").pop()}\n`);
-  return outfile;
+  return { outfile, sum: `${sha}  ${outfile.split("/").pop()}\n` };
 }
 
 if (import.meta.main) {
@@ -76,10 +77,14 @@ if (import.meta.main) {
   try {
     const entry = join(tmp, "entry.ts");
     writeFileSync(entry, entrySource(root));
+    const sums: string[] = [];
     for (const t of targets.length ? targets : [hostTarget()]) {
-      const out = build(t, entry, outDir);
-      console.log(`${out}  ${(statSync(out).size / 1048576).toFixed(1)} MB`);
+      const { outfile, sum } = build(t, entry, outDir);
+      sums.push(sum);
+      console.log(`${outfile}  ${(statSync(outfile).size / 1048576).toFixed(1)} MB`);
     }
+    // For `sha256sum -c SHA256SUMS`: the binaries this run built, never a stale one.
+    writeFileSync(join(outDir, "SHA256SUMS"), sums.join(""));
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
