@@ -10,7 +10,7 @@
  */
 
 import { existsSync } from "fs";
-import { mkdir, rename, readFile } from "fs/promises";
+import { mkdir, rename, readFile, realpath, readlink, stat, chmod, rm, writeFile } from "fs/promises";
 import path from "path";
 import os from "os";
 import { loadProfiles } from "../profiles/loader";
@@ -149,12 +149,48 @@ export async function readJsonFile(filePath: string): Promise<Record<string, unk
 }
 
 export async function writeJsonFile(filePath: string, data: unknown): Promise<void> {
-  const dir = path.dirname(filePath);
-  await mkdir(dir, { recursive: true });
-  const content = JSON.stringify(data, null, 2) + "\n";
-  const tmp = filePath + ".tmp";
-  await Bun.write(tmp, content);
-  await rename(tmp, filePath);
+  await writeTextFile(filePath, JSON.stringify(data, null, 2) + "\n");
+}
+
+// The kernel's own symlink-chain limit (Linux ELOOP), so a loop cannot spin.
+const MAX_LINK_HOPS = 40;
+
+/**
+ * The file a write to `filePath` should replace: the end of a symlink chain,
+ * even a dangling one, so a dotfiles-managed link survives the rename (#373).
+ */
+async function writeTarget(filePath: string): Promise<string> {
+  try {
+    return await realpath(filePath);
+  } catch (e: unknown) {
+    if (!isEnoent(e)) throw e;
+  }
+  let target = filePath;
+  for (let hop = 0; hop < MAX_LINK_HOPS; hop++) {
+    try {
+      target = path.resolve(path.dirname(target), await readlink(target));
+    } catch {
+      return target; // no file yet, or the end of the chain
+    }
+  }
+  return target;
+}
+
+/**
+ * Atomic write (temp file + rename) through any symlink, keeping the replaced
+ * file's mode: a 600 `~/.claude.json` can hold MCP server tokens (#373).
+ */
+async function writeTextFile(filePath: string, content: string): Promise<void> {
+  const target = await writeTarget(filePath);
+  await mkdir(path.dirname(target), { recursive: true });
+  const mode = await stat(target).then((s) => s.mode & 0o7777, () => undefined);
+  const tmp = target + ".tmp";
+  // A fresh temp file is created with the mode (narrowed by the umask), so it is
+  // never wider than the file it replaces; the chmod restores bits the umask cut.
+  await rm(tmp, { force: true });
+  await writeFile(tmp, content, mode === undefined ? undefined : { mode });
+  if (mode !== undefined) await chmod(tmp, mode);
+  await rename(tmp, target);
 }
 
 // ── CLAUDE.md helpers ─────────────────────────────────────────────────────────
@@ -174,14 +210,6 @@ Proactively:
 - \`recall__search("query")\` — find stored outputs by content when you don't have an ID`;
 
 export const CLAUDE_MD_BLOCK = `${CLAUDE_MD_MARKER_START}\n${CLAUDE_MD_SNIPPET}\n${CLAUDE_MD_MARKER_END}`;
-
-async function writeTextFile(filePath: string, content: string): Promise<void> {
-  const dir = path.dirname(filePath);
-  await mkdir(dir, { recursive: true });
-  const tmp = filePath + ".tmp";
-  await Bun.write(tmp, content);
-  await rename(tmp, filePath);
-}
 
 export function isClaudeMdInjected(content: string): boolean {
   return content.includes(CLAUDE_MD_MARKER_START);
