@@ -48,7 +48,7 @@ var __export = (target, all) => {
 var require_package = __commonJS((exports, module) => {
   module.exports = {
     name: "mcp-recall",
-    version: "1.17.0",
+    version: "1.18.0",
     description: "Context compression and persistent retrieval for Claude Code",
     author: {
       name: "sakebomb",
@@ -63,7 +63,16 @@ var require_package = __commonJS((exports, module) => {
     bugs: {
       url: "https://github.com/sakebomb/mcp-recall/issues"
     },
-    keywords: ["mcp", "claude", "claude-code", "context", "compression", "memory", "sqlite", "plugin"],
+    keywords: [
+      "mcp",
+      "claude",
+      "claude-code",
+      "context",
+      "compression",
+      "memory",
+      "sqlite",
+      "plugin"
+    ],
     engines: {
       bun: ">=1.1.0"
     },

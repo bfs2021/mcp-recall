@@ -6,6 +6,8 @@ All notable changes to mcp-recall are documented here. Format based on [Keep a C
 
 ## [Unreleased]
 
+## [1.18.0] — 2026-10-21
+
 ### Added
 
 - **A standalone binary, with no Bun needed at run time** (#361).
@@ -26,8 +28,7 @@ All notable changes to mcp-recall are documented here. Format based on [Keep a C
   release targets once and runs each on a GitHub-hosted Linux x64/arm64,
   macOS arm64/Intel or Windows runner. The checks now also run the registered
   hook through a shell, as Claude Code does, and switch an install from npm to
-  the binary and back with user edits in place. #364, #365 and #366 are
-  recorded as known defects there and fail the run once fixed. On macOS, CI
+  the binary and back with user edits in place. On macOS, CI
   records Gatekeeper's verdict on a quarantined copy and checks the README's
   workaround. `bun run sandbox:binary` runs the same checks locally in an
   offline Docker container.
@@ -937,7 +938,8 @@ Ten `recall__*` tools available in every Claude session:
 
 ---
 
-[Unreleased]: https://github.com/sakebomb/mcp-recall/compare/v1.17.0...HEAD
+[Unreleased]: https://github.com/sakebomb/mcp-recall/compare/v1.18.0...HEAD
+[1.18.0]: https://github.com/sakebomb/mcp-recall/compare/v1.17.0...v1.18.0
 [1.17.0]: https://github.com/sakebomb/mcp-recall/compare/v1.16.1...v1.17.0
 [1.16.1]: https://github.com/sakebomb/mcp-recall/compare/v1.16.0...v1.16.1
 [1.16.0]: https://github.com/sakebomb/mcp-recall/compare/v1.15.2...v1.16.0
