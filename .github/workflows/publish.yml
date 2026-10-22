@@ -58,16 +58,20 @@ jobs:
       - name: Build
         run: bun run build
 
+      # Trusted publishing (#382): npm authenticates this job by its OIDC token,
+      # matched against the trusted publisher configured for mcp-recall on
+      # npmjs.com (repo sakebomb/mcp-recall, workflow publish.yml). No token
+      # secret exists; npm refuses tokens that bypass 2FA. Needs npm >= 11.5.1,
+      # which Node 24 bundles. Renaming this file breaks publishing until the
+      # trusted publisher is updated to match.
       - name: Publish
         run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   # Standalone binaries attached to the release (#361). A separate job so the
-  # npm job keeps contents: read and this one never sees NPM_TOKEN or an OIDC
-  # token; it runs only after npm publish succeeded, so a failed release gets no
-  # binaries. On a dry run publish is skipped, which would skip this job too
-  # without the explicit condition.
+  # npm job keeps contents: read and this one never sees the OIDC token that
+  # publishes to npm; it runs only after npm publish succeeded, so a failed
+  # release gets no binaries. On a dry run publish is skipped, which would skip
+  # this job too without the explicit condition.
   binaries:
     name: Standalone binaries
     needs: publish
