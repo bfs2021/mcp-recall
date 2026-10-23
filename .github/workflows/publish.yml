@@ -61,17 +61,23 @@ jobs:
       # Trusted publishing (#382): npm authenticates this job by its OIDC token,
       # matched against the trusted publisher configured for mcp-recall on
       # npmjs.com (repo sakebomb/mcp-recall, workflow publish.yml). No token
-      # secret exists; npm refuses tokens that bypass 2FA. Needs npm >= 11.5.1,
-      # which Node 24 bundles. Renaming this file breaks publishing until the
-      # trusted publisher is updated to match.
-      - name: Publish
-        run: npm publish --provenance --access public
+      # secret exists; npm refuses tokens that bypass 2FA. Renaming this file
+      # breaks publishing until the trusted publisher is updated to match.
+      # Staged, not published: the version waits in npm's stage queue until a
+      # maintainer approves it with 2FA (`npm stage approve <id>` or the
+      # website). The OIDC token can stage but never approve, and the trusted
+      # publisher is stage-only, so a plain `npm publish` here is rejected.
+      # Needs npm >= 11.15.0, which Node 24 bundles.
+      - name: Stage for approval
+        run: npm stage publish --provenance --access public
 
   # Standalone binaries attached to the release (#361). A separate job so the
   # npm job keeps contents: read and this one never sees the OIDC token that
-  # publishes to npm; it runs only after npm publish succeeded, so a failed
-  # release gets no binaries. On a dry run publish is skipped, which would skip
-  # this job too without the explicit condition.
+  # stages to npm; it runs only after staging succeeded, so a failed release
+  # gets no binaries. The binaries are attached before the npm version is
+  # approved, so the release page can lead npm by the time approval takes. On a
+  # dry run publish is skipped, which would skip this job too without the
+  # explicit condition.
   binaries:
     name: Standalone binaries
     needs: publish
