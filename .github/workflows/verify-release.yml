@@ -1,0 +1,174 @@
+name: Verify release download
+
+# Release step 5 (#374): checks what a user actually downloads, after the npm
+# stage is approved. Manual only — the npm job fails until approval, and a
+# release event would fire before it. Reads only public release assets and the
+# public registry; it holds no write permission and no npm credential.
+#
+#   gh workflow run verify-release.yml                  # the latest release
+#   gh workflow run verify-release.yml -f tag=v1.18.1   # a specific one
+#
+# A PR that edits this file runs it against the latest release, so a change to
+# it is tested before it merges (workflow_dispatch only runs from main).
+on:
+  pull_request:
+    paths:
+      - .github/workflows/verify-release.yml
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (vX.Y.Z); empty = latest release"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    name: Resolve release
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      base: ${{ steps.tag.outputs.base }}
+    steps:
+      # The input arrives via env, not `${{ }}` inside run:, so a crafted value
+      # is data to bash rather than script text.
+      - id: tag
+        env:
+          INPUT_TAG: ${{ inputs.tag || '' }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -n "$INPUT_TAG" ]; then
+            TAG="$INPUT_TAG"
+            BASE="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
+          else
+            TAG="$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)"
+            # The URL docs/install.md Option D uses, verbatim.
+            BASE="https://github.com/$GITHUB_REPOSITORY/releases/latest/download"
+          fi
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::not a release tag: $TAG"; exit 1; }
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+          echo "verifying $TAG from $BASE"
+
+  binary:
+    name: Binary (${{ matrix.file }})
+    needs: resolve
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,    file: mcp-recall-linux-x64 }
+          - { os: ubuntu-24.04-arm, file: mcp-recall-linux-arm64 }
+          - { os: macos-latest,     file: mcp-recall-darwin-arm64 }
+          - { os: macos-15-intel,   file: mcp-recall-darwin-x64 }
+          - { os: windows-latest,   file: mcp-recall-windows-x64.exe }
+    defaults:
+      run:
+        shell: bash
+    env:
+      TAG: ${{ needs.resolve.outputs.tag }}
+      BASE: ${{ needs.resolve.outputs.base }}
+      F: ${{ matrix.file }}
+      # Workspace-relative: $RUNNER_TEMP is a D:\ path under Git Bash on Windows.
+      DL: dl
+    steps:
+      # The release's own checks script, not main's.
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.resolve.outputs.tag }}
+
+      # For the checks script's helpers; the binary runs with Bun removed from PATH.
+      - uses: oven-sh/setup-bun@v2.1.3
+        with:
+          bun-version: 1.3.14
+
+      - name: Download and check against SHA256SUMS
+        run: |
+          mkdir -p "$DL" && cd "$DL"
+          curl -fLO "$BASE/$F"
+          curl -fLO "$BASE/SHA256SUMS"
+          if command -v sha256sum >/dev/null; then
+            grep " $F\$" SHA256SUMS | sha256sum -c
+          else
+            grep " $F\$" SHA256SUMS | shasum -a 256 -c
+          fi
+
+      - name: Reports the release version
+        run: |
+          chmod +x "$DL/$F"
+          got="$("$DL/$F" --version)"
+          [ "$got" = "${TAG#v}" ] || { echo "::error::$F --version says $got, expected ${TAG#v}"; exit 1; }
+          echo "$F --version = $got"
+
+      # docs/install.md Option D from `install -m 755` on, in an empty HOME.
+      - name: Option D install, then status names the binary
+        if: runner.os != 'Windows'
+        run: |
+          export HOME="$RUNNER_TEMP/optd-home" && mkdir -p "$HOME"
+          cd "$DL"
+          mkdir -p ~/.local/bin
+          install -m 755 "$F" ~/.local/bin/mcp-recall
+          ~/.local/bin/mcp-recall install
+          out="$(~/.local/bin/mcp-recall status | perl -pe 's/\e\[[0-9;]*m//g')"
+          echo "$out"
+          echo "$out" | grep -A1 'Registered launch' | grep -q "binary .*✓ .*$HOME/.local/bin/mcp-recall" \
+            || { echo "::error::status does not name the Option D binary as the registered launch"; exit 1; }
+
+      # curl sets no quarantine attribute, so the download above already ran as
+      # docs/install.md says. A browser download is quarantined and the binary
+      # is not notarized: Gatekeeper's verdict is recorded, and the documented
+      # workaround is asserted.
+      - name: Gatekeeper on a quarantined copy
+        if: runner.os == 'macOS'
+        run: |
+          if xattr -p com.apple.quarantine "$DL/$F" 2>/dev/null; then
+            echo "::error::the curl download is quarantined; docs/install.md says it is not"; exit 1
+          fi
+          gk="$RUNNER_TEMP/gatekeeper/mcp-recall"
+          mkdir -p "$(dirname "$gk")" && cp "$DL/$F" "$gk"
+          xattr -w com.apple.quarantine "0083;$(printf %x "$(date +%s)");Safari;" "$gk"
+          spctl --assess --type execute -vv "$gk" || echo "::notice::Gatekeeper rejects a quarantined $F (expected: not notarized)"
+          xattr -d com.apple.quarantine "$gk"
+          "$gk" --version
+
+      - name: Full binary checks without Bun on PATH
+        run: bash scripts/packaged-cli-smoke.sh --binary "$DL/$F"
+
+  npm:
+    name: npm package
+    needs: resolve
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ needs.resolve.outputs.tag }}
+    steps:
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+
+      - uses: oven-sh/setup-bun@v2.1.3
+        with:
+          bun-version: 1.3.14
+
+      - name: Published, with provenance
+        run: |
+          V="${TAG#v}"
+          [ "$(npm view "mcp-recall@$V" version)" = "$V" ] \
+            || { echo "::error::mcp-recall@$V is not on npm (stage not approved yet?)"; exit 1; }
+          prov="$(npm view "mcp-recall@$V" dist.attestations.provenance.predicateType)"
+          [ -n "$prov" ] || { echo "::error::mcp-recall@$V has no provenance attestation"; exit 1; }
+          echo "mcp-recall@$V on npm, provenance $prov; dist-tags: $(npm view mcp-recall dist-tags --json | tr -d '\n ')"
+
+      - name: Clean-project install, then install and status in an empty HOME
+        run: |
+          V="${TAG#v}"
+          mkdir -p "$RUNNER_TEMP/proj" "$RUNNER_TEMP/npm-home" && cd "$RUNNER_TEMP/proj"
+          npm init -y >/dev/null
+          npm install --no-fund --no-audit "mcp-recall@$V"
+          npm audit signatures
+          got="$(npx mcp-recall --version)"
+          [ "$got" = "$V" ] || { echo "::error::npx mcp-recall --version says $got, expected $V"; exit 1; }
+          HOME="$RUNNER_TEMP/npm-home" npx mcp-recall install
+          HOME="$RUNNER_TEMP/npm-home" npx mcp-recall status
