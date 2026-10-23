@@ -6,6 +6,22 @@ All notable changes to mcp-recall are documented here. Format based on [Keep a C
 
 ## [Unreleased]
 
+## [1.18.1] — 2026-10-22
+
+### Fixed
+
+- **1.18.0, published.** 1.18.0 never reached npm: its publish failed
+  (E404) because npm no longer accepts tokens that bypass 2FA, so its
+  release page has no binaries either. 1.18.1 carries the same code; the
+  1.18.0 notes below describe what it contains.
+
+### Changed
+
+- **Releases are staged on npm and approved with 2FA** (#382). The publish
+  workflow authenticates through npm trusted publishing and runs
+  `npm stage publish`; no npm token exists. A version reaches npm only after
+  a maintainer approves it with 2FA, which CI cannot do.
+
 ## [1.18.0] — 2026-10-21
 
 ### Added
@@ -938,7 +954,8 @@ Ten `recall__*` tools available in every Claude session:
 
 ---
 
-[Unreleased]: https://github.com/sakebomb/mcp-recall/compare/v1.18.0...HEAD
+[Unreleased]: https://github.com/sakebomb/mcp-recall/compare/v1.18.1...HEAD
+[1.18.1]: https://github.com/sakebomb/mcp-recall/compare/v1.18.0...v1.18.1
 [1.18.0]: https://github.com/sakebomb/mcp-recall/compare/v1.17.0...v1.18.0
 [1.17.0]: https://github.com/sakebomb/mcp-recall/compare/v1.16.1...v1.17.0
 [1.16.1]: https://github.com/sakebomb/mcp-recall/compare/v1.16.0...v1.16.1
