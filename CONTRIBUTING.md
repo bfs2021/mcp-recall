@@ -69,8 +69,9 @@ Release-morning steps:
 
 1. Dry-run the binaries job: `gh workflow run publish.yml --ref main`. It builds and smoke-tests every target, keeps them as a 7-day workflow artifact, and publishes nothing. Its binaries report `<version>-dryrun.<sha>`, so they cannot pass for a release.
 2. Open the release PR: bump `package.json` and both `plugin.json` files, date the `CHANGELOG.md` section, rebuild.
-3. After it merges, create the GitHub release `v<version>` (`gh release create --target` needs the full SHA). That runs `publish.yml`, which checks the tag matches `package.json`, publishes to npm and attaches the binaries plus `SHA256SUMS`.
-4. Verify from a real download: the npm package from a clean project, and a binary from the release page.
+3. After it merges, create the GitHub release `v<version>` (`gh release create --target` needs the full SHA). That runs `publish.yml`, which checks the tag matches `package.json`, stages the package on npm and attaches the binaries plus `SHA256SUMS`.
+4. Approve the staged version with 2FA: `npm stage list mcp-recall`, then `npm stage approve <stage-id>`, or approve it on npmjs.com. Nothing reaches npm until then. CI cannot approve, and the trusted publisher is stage-only, so CI cannot publish directly either.
+5. Verify from a real download: the npm package from a clean project, and a binary from the release page.
 
 ## Contributing a profile
 
