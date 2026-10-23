@@ -23,15 +23,26 @@ describe("referenced", () => {
   const raw = "M src/hooks/post-tool-use.ts\nM tests/fidelity.test.ts";
 
   it("returns pieces of the output that Claude used next", () => {
-    expect(referenced(raw, "git status", "I'll open src/hooks/post-tool-use.ts")).toEqual(["src/hooks/post-tool-use.ts"]);
+    expect(referenced(raw, raw, "git status", "I'll open src/hooks/post-tool-use.ts")).toEqual(["src/hooks/post-tool-use.ts"]);
   });
 
   it("ignores a piece the command already contained", () => {
-    expect(referenced(raw, "git diff src/hooks/post-tool-use.ts", "src/hooks/post-tool-use.ts changed")).toEqual([]);
+    expect(referenced(raw, raw, "git diff src/hooks/post-tool-use.ts", "src/hooks/post-tool-use.ts changed")).toEqual([]);
   });
 
   it("returns nothing without a follow-up", () => {
-    expect(referenced(raw, "git status", "")).toEqual([]);
+    expect(referenced(raw, raw, "git status", "")).toEqual([]);
+  });
+
+  it("never credits text Claude Code added around a preview", () => {
+    const shown = "Output too large. Full output saved to /home/u/.claude/tool-results/b1.txt\nM src/hooks/post-tool-use.ts";
+    expect(referenced(shown, raw, "git status", "cat /home/u/.claude/tool-results/b1.txt; open src/hooks/post-tool-use.ts"))
+      .toEqual(["src/hooks/post-tool-use.ts"]);
+  });
+
+  it("scores only pieces Claude was shown, not the rest of a saved output", () => {
+    expect(referenced("M src/hooks/post-tool-use.ts", raw, "git status", "tests/fidelity.test.ts and src/hooks/post-tool-use.ts"))
+      .toEqual(["src/hooks/post-tool-use.ts"]);
   });
 });
 
@@ -50,11 +61,27 @@ describe("falseClaim", () => {
   it("does not flag a clean claim over an output with no error", () => {
     expect(falseClaim("all 12 tests passed", "no errors")).toBe(false);
   });
+
+  it("does not flag a claim the output makes in another case", () => {
+    expect(falseClaim("no errors in lint\n1 failed in test", "No errors")).toBe(false);
+  });
+
+  it("is not hidden by a longer word in the output that contains the claim", () => {
+    expect(falseClaim("cleanup done\nFATAL: disk full", "clean")).toBe(true);
+  });
+});
+
+describe("add", () => {
+  it("counts an output with an error for false claims even when Claude referenced nothing", () => {
+    const s = emptyScore();
+    add(s, [], "step 1\nerror: boom", "0 errors");
+    expect(s).toMatchObject({ calls: 0, pieces: 0, errorCalls: 1, falseClaims: 1 });
+  });
 });
 
 describe("controls", () => {
   const raw = "first line here\nsrc/a/b.ts:12 failure in parseThing\nsrc/c/d.ts:40 failure in otherThing";
-  const pieces = referenced(raw, "bun test", "fix src/a/b.ts:12 parseThing then src/c/d.ts:40 otherThing");
+  const pieces = referenced(raw, raw, "bun test", "fix src/a/b.ts:12 parseThing then src/c/d.ts:40 otherThing");
 
   it("pass-through keeps every piece and the first line keeps none", () => {
     expect(pieces.length).toBeGreaterThan(0);
@@ -101,26 +128,45 @@ describe("recordedBash follow-up", () => {
 
   const line = (o: object) => JSON.stringify(o);
   const bashUse = (id: string, command: string) => ({ type: "tool_use", id, name: "Bash", input: { command } });
+  const said = (id: string, content: object[]) => line({ message: { id, role: "assistant", content } });
   const result = (id: string, stdout: string) =>
-    line({ message: { role: "user", content: [{ type: "tool_result", tool_use_id: id }] }, toolUseResult: { stdout, stderr: "" } });
+    line({ message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, content: stdout }] }, toolUseResult: { stdout, stderr: "" } });
 
   it("collects the assistant turn after a result, including tool inputs, and stops at the next user line", () => {
     dir = mkdtempSync(join(tmpdir(), "fidelity-test-"));
     writeFileSync(join(dir, "s.jsonl"), [
-      line({ message: { role: "assistant", content: [bashUse("a", "ls"), bashUse("b", "pwd")] } }),
+      said("m1", [bashUse("a", "ls"), bashUse("b", "pwd")]),
       result("a", "src/x.ts"),
       result("b", "/home/u"),
-      line({ message: { role: "assistant", content: [{ type: "text", text: "Reading src/x.ts" }] } }),
-      line({ message: { role: "assistant", content: [{ type: "tool_use", id: "c", name: "Read", input: { file_path: "/home/u/src/x.ts" } }] } }),
+      said("m2", [{ type: "text", text: "Reading src/x.ts" }]),
+      said("m2", [{ type: "tool_use", id: "c", name: "Read", input: { file_path: "/home/u/src/x.ts" } }]),
       line({ message: { role: "user", content: "thanks" } }),
-      line({ message: { role: "assistant", content: [{ type: "text", text: "unrelated later turn" }] } }),
+      said("m3", [{ type: "text", text: "unrelated later turn" }]),
     ].join("\n"));
 
     const { calls } = recordedBash(dir);
     expect(calls.map((c) => c.command)).toEqual(["ls", "pwd"]);
+    expect(calls.map((c) => c.shown)).toEqual(["src/x.ts", "/home/u"]);
     for (const c of calls) {
       expect(c.followup).toBe("Reading src/x.ts\n/home/u/src/x.ts");
     }
+  });
+
+  it("does not take the issuing message's later blocks as the follow-up when results interleave", () => {
+    dir = mkdtempSync(join(tmpdir(), "fidelity-test-"));
+    writeFileSync(join(dir, "s.jsonl"), [
+      said("m1", [bashUse("a", "ls")]),
+      result("a", "src/x.ts"),
+      said("m1", [bashUse("b", "cat src/y.ts")]),
+      result("b", "export const y = 1"),
+      said("m2", [{ type: "text", text: "Both read; src/x.ts next" }]),
+    ].join("\n"));
+
+    const { calls } = recordedBash(dir);
+    expect(calls.map((c) => [c.command, c.followup])).toEqual([
+      ["ls", "Both read; src/x.ts next"],
+      ["cat src/y.ts", "Both read; src/x.ts next"],
+    ]);
   });
 
   it("skips a result mcp-recall already compressed", () => {

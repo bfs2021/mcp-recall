@@ -52,41 +52,65 @@ export function candidates(raw: string): Set<string> {
   return out;
 }
 
-/** Candidates that reappear in Claude's follow-up and were not already in the command it typed. */
-export function referenced(raw: string, command: string, followup: string): string[] {
+/**
+ * Candidates of what Claude was shown that reappear in its follow-up and were not
+ * already in the command it typed. A piece must also be in the raw output, so text
+ * Claude Code added around a preview (a saved-file notice) is never credited to it.
+ */
+export function referenced(shown: string, raw: string, command: string, followup: string): string[] {
   if (!followup) return [];
-  return [...candidates(raw)].filter((p) => followup.includes(p) && !command.includes(p));
+  return [...candidates(shown)].filter((p) => followup.includes(p) && !command.includes(p) && raw.includes(p));
 }
 
 export const kept = (pieces: string[], delivered: string): number => pieces.filter((p) => delivered.includes(p)).length;
 
-const CLAIM_RE = /\b(0 errors?|no errors?|0 failed|0 failures|no matches|no changes|nothing to commit|all clean|clean)\b/i;
-const ERROR_RE = /\b(error|errors|fail|failed|failure|fatal|panic|exception|traceback)\b/i;
+const CLAIM_RE = /\b(0 errors?|no errors?|0 failed|0 failures|no matches|no changes|nothing to commit|all clean|clean)\b/gi;
+export const ERROR_RE = /\b(error|errors|fail|failed|failure|fatal|panic|exception|traceback)\b/i;
 
-/** A summary that claims a clean result the output does not support, and did not copy from it. */
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/**
+ * A summary that claims a clean result over an output with an error, where the
+ * output does not make that claim itself (word-bounded, any case), so a copied
+ * line is never counted.
+ */
 export function falseClaim(raw: string, delivered: string): boolean {
-  const claim = delivered.match(CLAIM_RE)?.[0];
-  return !!claim && !raw.includes(claim) && ERROR_RE.test(raw);
+  if (!ERROR_RE.test(raw)) return false;
+  return [...delivered.matchAll(CLAIM_RE)].some(([claim]) => !new RegExp(`\\b${escapeRe(claim)}\\b`, "i").test(raw));
 }
 
 export const headBytes = (raw: string, n: number): string => Buffer.from(raw, "utf8").subarray(0, n).toString("utf8");
 export const firstLine = (raw: string): string => raw.split("\n")[0];
 
-export interface Score { pieces: number; kept: number; orig: number; delivered: number; calls: number; falseClaims: number }
-export const emptyScore = (): Score => ({ pieces: 0, kept: 0, orig: 0, delivered: 0, calls: 0, falseClaims: 0 });
+/**
+ * Recall and bytes cover calls with referenced pieces. False claims cover every
+ * scored output that holds an error, referenced or not: a summary claiming "0
+ * errors" is most harmful exactly when Claude then has nothing to follow up on.
+ */
+export interface Score { pieces: number; kept: number; orig: number; delivered: number; calls: number; errorCalls: number; falseClaims: number }
+export const emptyScore = (): Score => ({ pieces: 0, kept: 0, orig: 0, delivered: 0, calls: 0, errorCalls: 0, falseClaims: 0 });
 
 export function add(s: Score, pieces: string[], raw: string, delivered: string): void {
-  s.calls++;
-  s.pieces += pieces.length;
-  s.kept += kept(pieces, delivered);
-  s.orig += Buffer.byteLength(raw, "utf8");
-  s.delivered += Buffer.byteLength(delivered, "utf8");
-  if (falseClaim(raw, delivered)) s.falseClaims++;
+  if (pieces.length > 0) {
+    s.calls++;
+    s.pieces += pieces.length;
+    s.kept += kept(pieces, delivered);
+    s.orig += Buffer.byteLength(raw, "utf8");
+    s.delivered += Buffer.byteLength(delivered, "utf8");
+  }
+  if (ERROR_RE.test(raw)) {
+    s.errorCalls++;
+    if (falseClaim(raw, delivered)) s.falseClaims++;
+  }
 }
 
 export const recall = (s: Score): number => (s.pieces > 0 ? s.kept / s.pieces : 1);
 
-/** Why the controls fail, or null when pass-through is perfect and the first line scores low. */
+/**
+ * Why the controls fail, or null when pass-through is perfect and the first line
+ * scores low. Pass-through holds by construction (pieces are substrings of the raw
+ * output), so it guards the extraction code; the first line is the real check.
+ */
 export function controlsBroken(pass: Score, first: Score): string | null {
   if (pass.pieces === 0) return "no referenced pieces found: nothing to score";
   if (pass.kept !== pass.pieces) return `pass-through kept ${pass.kept}/${pass.pieces}; it must keep every piece`;
@@ -114,8 +138,8 @@ async function main(): Promise<void> {
     const { normalizeCommand, isCompoundCommand } = await import("../src/handlers/bash");
     const { calls, compressed } = recordedBash(opt("--projects") ?? join(homedir(), ".claude/projects"));
     const rows = toRows(calls, normalizeCommand, isCompoundCommand);
-    printHeader(root, rtk.version, calls.length, compressed, rows.length);
-    const totals = score(rows, hook, rtk.pipe);
+    printHeader(root, rtk.version, calls.length, compressed, rows.filter((r) => r.pieces.length > 0).length);
+    const totals = score(rows, hook, rtk.version !== null ? rtk.pipe : null);
     printTable(totals, rtk.version !== null);
     const broken = controlsBroken(totals.get("all")!.pass, totals.get("all")!.first);
     if (broken) { console.error(`\ncontrols failed: ${broken}`); process.exitCode = 1; }
@@ -128,8 +152,9 @@ function toRows(calls: Recorded[], normalize: (c: string) => string, compound: (
   const rows: Row[] = [];
   for (const call of calls) {
     const raw = call.stderr ? `${call.stdout}\n${call.stderr}` : call.stdout;
-    const pieces = referenced(raw, call.command, call.followup);
-    if (pieces.length === 0) continue;
+    const pieces = referenced(call.shown, raw, call.command, call.followup);
+    // Unreferenced output still counts for false claims when it holds an error.
+    if (pieces.length === 0 && !ERROR_RE.test(raw)) continue;
     // normalizeCommand has already dropped `cd … &&` prefixes and wrappers, so the
     // family is the command that ran, whatever follows it.
     const n = normalize(call.command);
@@ -144,16 +169,18 @@ function toRows(calls: Recorded[], normalize: (c: string) => string, compound: (
 }
 
 // oursChanged and head cover only the calls mcp-recall compressed: elsewhere both
-// deliver the whole output, which would hide the comparison.
-interface Totals { ours: Score; oursChanged: Score; head: Score; first: Score; pass: Score; rtk: Score }
+// deliver the whole output, which would hide the comparison. rtkFailed counts
+// outputs rtk's filter exited non-zero on; they are left out of rtk's column.
+interface Totals { ours: Score; oursChanged: Score; head: Score; first: Score; pass: Score; rtk: Score; rtkFailed: number }
 
-function score(rows: Row[], hook: { deliver: (c: string, o: string, e: string) => { delivered: string } }, rtkPipe: (f: string, raw: string) => string | null): Map<string, Totals> {
+function score(rows: Row[], hook: { deliver: (c: string, o: string, e: string) => { delivered: string } }, rtkPipe: ((f: string, raw: string) => string | null) | null): Map<string, Totals> {
   const totals = new Map<string, Totals>();
-  const at = (k: string) => totals.get(k) ?? (totals.set(k, { ours: emptyScore(), oursChanged: emptyScore(), head: emptyScore(), first: emptyScore(), pass: emptyScore(), rtk: emptyScore() }), totals.get(k)!);
+  const at = (k: string) => totals.get(k) ?? (totals.set(k, { ours: emptyScore(), oursChanged: emptyScore(), head: emptyScore(), first: emptyScore(), pass: emptyScore(), rtk: emptyScore(), rtkFailed: 0 }), totals.get(k)!);
   for (const r of rows) {
     const ours = hook.deliver(r.call.command, r.call.stdout, r.call.stderr).delivered;
-    const theirs = r.rtkFamily ? rtkPipe(r.rtkFamily, r.raw) : null;
+    const theirs = r.rtkFamily && rtkPipe ? rtkPipe(r.rtkFamily, r.raw) : null;
     for (const t of [at(r.family), at("all")]) {
+      if (r.rtkFamily && rtkPipe && theirs === null) t.rtkFailed++;
       add(t.ours, r.pieces, r.raw, ours);
       if (ours !== r.raw) {
         add(t.oursChanged, r.pieces, r.raw, ours);
@@ -190,19 +217,27 @@ function printHeader(root: string, rtkVersion: string | null, recorded: number, 
   console.log(`${recorded} recorded Bash results (${compressed} more were already compressed, so cannot be scored); ${scored} have pieces Claude went on to use\n`);
 }
 
+// The compressed-only columns lead: on every other call mcp-recall passes the
+// output whole, so its all-calls recall is mostly 100% by construction.
 function printTable(totals: Map<string, Totals>, withRtk: boolean): void {
-  const cols = ["Family", "Calls", "Pieces", "mcp-recall recall · reduction", "Compressed: mcp-recall (calls)", "Compressed: head, same size", "First line", "Pass-through"];
+  const cols = ["Family", "Calls", "Pieces", "Compressed: mcp-recall (calls)", "Compressed: head, same size"];
   if (withRtk) cols.push("rtk recall · reduction (calls)");
-  cols.push(withRtk ? "False claims (mcp-recall · rtk)" : "False claims");
+  cols.push("All calls: mcp-recall recall · reduction", "First line", "Pass-through");
+  cols.push(withRtk ? "False claims / outputs with an error (mcp-recall · rtk)" : "False claims / outputs with an error");
   console.log(`| ${cols.join(" | ")} |`);
   console.log(`|${cols.map(() => " --- ").join("|")}|`);
   for (const [k, t] of [...totals].sort((a, b) => (a[0] === "all" ? -1 : b[0] === "all" ? 1 : b[1].ours.pieces - a[1].ours.pieces))) {
-    const cells = [k, `${t.ours.calls}`, `${t.ours.pieces}`, `${pc(recall(t.ours))} · ${red(t.ours)}`,
-      t.oursChanged.calls ? `${pc(recall(t.oursChanged))} (${t.oursChanged.calls})` : "—", t.head.calls ? pc(recall(t.head)) : "—", pc(recall(t.first)), pc(recall(t.pass))];
+    const cells = [k, `${t.ours.calls}`, `${t.ours.pieces}`,
+      t.oursChanged.calls ? `${pc(recall(t.oursChanged))} (${t.oursChanged.calls})` : "—", t.head.calls ? pc(recall(t.head)) : "—"];
     if (withRtk) cells.push(t.rtk.calls ? `${pc(recall(t.rtk))} · ${red(t.rtk)} (${t.rtk.calls})` : "—");
-    cells.push(withRtk ? `${t.ours.falseClaims} · ${t.rtk.falseClaims}` : `${t.ours.falseClaims}`);
+    const rc = (s: Score) => (s.pieces > 0 ? pc(recall(s)) : "—");
+    cells.push(`${rc(t.ours)} · ${red(t.ours)}`, rc(t.first), rc(t.pass));
+    const claims = (s: Score) => `${s.falseClaims}/${s.errorCalls}`;
+    cells.push(withRtk ? `${claims(t.ours)} · ${claims(t.rtk)}` : claims(t.ours));
     console.log(`| ${cells.join(" | ")} |`);
   }
+  const failed = totals.get("all")?.rtkFailed ?? 0;
+  if (withRtk && failed > 0) console.log(`\nrtk's filter exited non-zero on ${failed} outputs; they are left out of its column.`);
   console.log("\nRecall: share of referenced pieces still in what Claude would receive first. Literal matching; outputs received whole only; one user's workload.");
   console.log("It does not credit retrieval: mcp-recall can return a stored body on request, and rtk prints recovery hints.");
 }

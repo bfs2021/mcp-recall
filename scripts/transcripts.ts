@@ -26,8 +26,18 @@ export interface Recorded {
   command: string;
   stdout: string;
   stderr: string;
+  /**
+   * The text Claude was shown: the tool_result content. It differs from stdout when
+   * Claude Code saved a large output to a file and showed a preview.
+   */
+  shown: string;
   /** What Claude wrote and ran in its next turn: text, thinking and tool inputs, in order. */
   followup: string;
+}
+
+function resultText(content: unknown): string {
+  if (typeof content === "string") return content;
+  return Array.isArray(content) ? content.map((c: any) => (typeof c?.text === "string" ? c.text : "")).join("\n") : "";
 }
 
 /** Every string inside a tool call's input, so a path Claude passed on is found unescaped. */
@@ -47,32 +57,40 @@ function blockText(b: any): string {
 
 /**
  * Every Bash result in the transcripts, once each, minus those the hook had already
- * compressed. A result's follow-up is the assistant content after it, up to the next
- * user line that follows that content or is a prompt rather than a result. Parallel
- * results arrive one per line and share one follow-up.
+ * compressed. A result's follow-up is what Claude wrote after seeing it: assistant
+ * content from a later message, up to the next user line after that content or the
+ * next prompt. Parallel results arrive one per line and share one follow-up.
+ *
+ * Claude Code writes each block of a message as its own line, and can write a
+ * result before the rest of the message that issued the call. Blocks of the
+ * issuing message are therefore never a follow-up: they were written before the
+ * result was seen.
  */
 export function recordedBash(dir: string): { calls: Recorded[]; compressed: number } {
   const calls: Recorded[] = [];
   const seen = new Set<string>();
   let compressed = 0;
   for (const file of transcriptFiles(dir)) {
-    const uses = new Map<string, string>();
+    const uses = new Map<string, { command: string; message: unknown }>();
     let collecting: Recorded[] = [];
+    let issuers = new Set<unknown>();
     let replied = false;
     for (const line of readFileSync(file, "utf8").split("\n")) {
       let d: any;
       try { d = JSON.parse(line); } catch { continue; }
       const blocks: any[] = Array.isArray(d?.message?.content) ? d.message.content : [];
-      if (d?.message?.role === "assistant") {
+      const id = d?.message?.id;
+      if (d?.message?.role === "assistant" && collecting.length > 0 && !(id !== undefined && issuers.has(id))) {
         replied = true;
         const text = blocks.map(blockText).filter(Boolean).join("\n");
         if (text) for (const c of collecting) c.followup += `${c.followup ? "\n" : ""}${text}`;
       } else if (d?.message?.role === "user" && (replied || !blocks.some((b) => b?.type === "tool_result"))) {
         collecting = [];
+        issuers = new Set();
         replied = false;
       }
       for (const b of blocks) {
-        if (b.type === "tool_use" && b.name === "Bash" && typeof b.input?.command === "string") uses.set(b.id, b.input.command);
+        if (b.type === "tool_use" && b.name === "Bash" && typeof b.input?.command === "string") uses.set(b.id, { command: b.input.command, message: id });
         // A subagent transcript and its parent can both hold one call.
         if (b.type !== "tool_result" || !uses.has(b.tool_use_id) || seen.has(b.tool_use_id)) continue;
         seen.add(b.tool_use_id);
@@ -80,9 +98,13 @@ export function recordedBash(dir: string): { calls: Recorded[]; compressed: numb
         if (typeof r?.stdout !== "string") continue;
         if (/^\[recall:recall_[0-9a-f]+/.test(r.stdout)) { compressed++; continue; }
         const persisted = typeof r.persistedOutputPath === "string" && existsSync(r.persistedOutputPath);
-        const call: Recorded = { command: uses.get(b.tool_use_id)!, stdout: persisted ? readFileSync(r.persistedOutputPath, "utf8") : r.stdout, stderr: persisted ? "" : String(r.stderr ?? ""), followup: "" };
+        const use = uses.get(b.tool_use_id)!;
+        const stdout = persisted ? readFileSync(r.persistedOutputPath, "utf8") : r.stdout;
+        const stderr = persisted ? "" : String(r.stderr ?? "");
+        const call: Recorded = { command: use.command, stdout, stderr, shown: resultText(b.content) || (stderr ? `${stdout}\n${stderr}` : stdout), followup: "" };
         calls.push(call);
         collecting.push(call);
+        if (use.message !== undefined) issuers.add(use.message);
       }
     }
   }
