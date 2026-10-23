@@ -15,7 +15,7 @@ All notable changes to mcp-recall are documented here. Format based on [Keep a C
   by their status code; up to 50 paths per category are listed instead of 5;
   and the branch, upstream and ahead/behind lines are kept. On one developer's
   transcripts, `bun run fidelity` puts `git status` recall at 100%, from
-  85.5%, for 1.4 points of reduction on that command.
+  85.5%; the cost is a lower reduction on that command, 15.6% from 17.0%.
 
 ## [1.18.1] — 2026-10-22
 
