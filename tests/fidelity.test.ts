@@ -120,6 +120,10 @@ describe("headBytes", () => {
   it("cuts to a byte budget", () => {
     expect(headBytes("abcdef", 3)).toBe("abc");
   });
+
+  it("drops a character the cut splits instead of leaving a replacement character", () => {
+    expect(headBytes("aé", 2)).toBe("a");
+  });
 });
 
 describe("recordedBash follow-up", () => {

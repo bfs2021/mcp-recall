@@ -106,6 +106,7 @@ var require_package = __commonJS((exports, module) => {
       "build:binary": "bun run scripts/build-binary.ts",
       "sandbox:binary": "bash scripts/sandbox-binary.sh",
       measure: "bun run scripts/measure-store.ts",
+      fidelity: "bun run scripts/fidelity.ts",
       build: "bun build src/server.ts --target bun --outfile plugins/mcp-recall/dist/server.js && bun build src/cli.ts --target bun --outfile plugins/mcp-recall/dist/cli.js && cp hooks/hooks.json plugins/mcp-recall/hooks/hooks.json && rm -rf plugins/mcp-recall/profiles && cp -r profiles plugins/mcp-recall/profiles",
       prepare: "git config core.hooksPath .githooks"
     },

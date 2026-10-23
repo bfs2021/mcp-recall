@@ -79,7 +79,8 @@ export function falseClaim(raw: string, delivered: string): boolean {
   return [...delivered.matchAll(CLAIM_RE)].some(([claim]) => !new RegExp(`\\b${escapeRe(claim)}\\b`, "i").test(raw));
 }
 
-export const headBytes = (raw: string, n: number): string => Buffer.from(raw, "utf8").subarray(0, n).toString("utf8");
+// A byte cut can split a multi-byte character; drop the partial one rather than decode it as U+FFFD.
+export const headBytes = (raw: string, n: number): string => Buffer.from(raw, "utf8").subarray(0, n).toString("utf8").replace(/�$/, "");
 export const firstLine = (raw: string): string => raw.split("\n")[0];
 
 /**
