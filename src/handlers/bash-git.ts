@@ -146,6 +146,60 @@ export const gitLogHandler: Handler = (
 // git status
 // ---------------------------------------------------------------------------
 
+// Paths listed per category before the rest are counted. git status is usually
+// short, and the paths are what Claude acts on (#352: a 5-path cap dropped them).
+const MAX_STATUS_PATHS = 50;
+
+// Unmerged pairs in porcelain v1 (git-status(1), "Short Format").
+const CONFLICT_CODES = new Set(["DD", "AU", "UD", "UA", "DU", "AA", "UU"]);
+const LONG_CONFLICT = /^(both modified|both added|both deleted|added by us|added by them|deleted by us|deleted by them):\s*/;
+const LONG_ENTRY = /^(modified|new file|deleted|renamed|copied|typechange):\s*/;
+// Kept verbatim: the branch, its upstream and ahead/behind are often why status was run.
+const BRANCH_LINE = /^(On branch |HEAD detached |Your branch |## )/;
+
+interface StatusParts { branch: string[]; staged: string[]; unstaged: string[]; untracked: string[]; conflicts: string[] }
+
+/**
+ * One porcelain v1 line: two status columns, a space, the path. Matched on the
+ * untrimmed line, since a blank first column (" M file", changed but unstaged) is
+ * the most common entry.
+ */
+function parsePorcelain(line: string, parts: StatusParts): boolean {
+  const m = line.match(/^([ MTADRCU?!])([ MTADRCU?!]) (.+)$/);
+  if (!m) return false;
+  const [, x, y, path] = m as [string, string, string, string];
+  if (CONFLICT_CODES.has(x + y)) parts.conflicts.push(`${x}${y} ${path}`);
+  else if (x === "?") parts.untracked.push(path);
+  else if (x !== "!") {
+    if (x !== " ") parts.staged.push(`${x} ${path}`);
+    if (y !== " ") parts.unstaged.push(`${y} ${path}`);
+  }
+  return true;
+}
+
+function parseStatus(stdout: string): StatusParts {
+  const parts: StatusParts = { branch: [], staged: [], unstaged: [], untracked: [], conflicts: [] };
+  let section: "staged" | "unstaged" | "untracked" | "unmerged" | null = null;
+  for (const line of stdout.split("\n")) {
+    const trimmed = line.trim();
+    if (BRANCH_LINE.test(trimmed)) { parts.branch.push(trimmed); continue; }
+    if (trimmed.startsWith("Changes to be committed")) { section = "staged"; continue; }
+    if (trimmed.startsWith("Changes not staged")) { section = "unstaged"; continue; }
+    if (trimmed.startsWith("Untracked files")) { section = "untracked"; continue; }
+    if (trimmed.startsWith("Unmerged paths")) { section = "unmerged"; continue; }
+    if (!trimmed || trimmed.startsWith("(") || trimmed.startsWith("no changes") || trimmed.startsWith("nothing")) continue;
+    // Long-format entries are tab-indented, so a porcelain line never starts with a tab.
+    if (!line.startsWith("\t") && parsePorcelain(line, parts)) continue;
+    if (LONG_CONFLICT.test(trimmed)) parts.conflicts.push(trimmed.replace(LONG_CONFLICT, ""));
+    else if ((section === "staged" || section === "unstaged") && LONG_ENTRY.test(trimmed)) parts[section].push(trimmed.replace(LONG_ENTRY, ""));
+    else if (section === "untracked") parts.untracked.push(trimmed);
+  }
+  return parts;
+}
+
+const pathList = (label: string, paths: string[]): string =>
+  `  ${label} (${paths.length}): ${paths.slice(0, MAX_STATUS_PATHS).join(", ")}${paths.length > MAX_STATUS_PATHS ? ` +${paths.length - MAX_STATUS_PATHS} more` : ""}`;
+
 export const gitStatusHandler: Handler = (
   toolName: string,
   output: unknown
@@ -157,57 +211,18 @@ export const gitStatusHandler: Handler = (
     return { summary: "[git status — clean working tree]", originalSize };
   }
 
-  const staged: string[] = [];
-  const unstaged: string[] = [];
-  const untracked: string[] = [];
-  const conflicts: string[] = [];
-
-  let section: "staged" | "unstaged" | "untracked" | null = null;
-
-  for (const line of stdout.split("\n")) {
-    const trimmed = line.trim();
-    if (trimmed.startsWith("Changes to be committed")) { section = "staged"; continue; }
-    if (trimmed.startsWith("Changes not staged")) { section = "unstaged"; continue; }
-    if (trimmed.startsWith("Untracked files")) { section = "untracked"; continue; }
-    if (trimmed.startsWith("both modified") || trimmed.startsWith("both added")) {
-      conflicts.push(trimmed);
-      continue;
-    }
-    if (!trimmed || trimmed.startsWith("(") || trimmed.startsWith("no changes")) continue;
-
-    // Skip header lines and hints
-    if (trimmed.startsWith("On branch") || trimmed.startsWith("HEAD") ||
-        trimmed.startsWith("Your branch") || trimmed.startsWith("nothing")) continue;
-
-    // Porcelain-style (git status --short or similar)
-    const porcelain = line.match(/^([MADRCU?!]{1,2})\s+(.+)$/);
-    if (porcelain) {
-      const [, code, file] = porcelain as [string, string, string];
-      if (code.startsWith("?")) untracked.push(file);
-      else if (code[0] !== " " && code[0] !== "?") staged.push(`${code[0]} ${file}`);
-      if (code[1] && code[1] !== " " && code[1] !== "?") unstaged.push(`${code[1]} ${file}`);
-      continue;
-    }
-
-    if (section === "staged" && trimmed.match(/^(modified|new file|deleted|renamed):/)) {
-      staged.push(trimmed);
-    } else if (section === "unstaged" && trimmed.match(/^(modified|deleted):/)) {
-      unstaged.push(trimmed);
-    } else if (section === "untracked" && trimmed && !trimmed.startsWith("(")) {
-      untracked.push(trimmed);
-    }
-  }
-
+  const parts = parseStatus(stdout);
+  const { branch, staged, unstaged, untracked, conflicts } = parts;
   if (staged.length === 0 && unstaged.length === 0 && untracked.length === 0 && conflicts.length === 0) {
     // Couldn't parse — fall back to shell
     return shellHandler(toolName, output);
   }
 
-  const lines = ["git status"];
-  if (conflicts.length > 0) lines.push(`  conflicts (${conflicts.length}): ${conflicts.slice(0, 5).join(", ")}`);
-  if (staged.length > 0) lines.push(`  staged (${staged.length}): ${staged.slice(0, 5).map(f => f.replace(/^(modified|new file|deleted|renamed):\s*/, "")).join(", ")}${staged.length > 5 ? ` +${staged.length - 5} more` : ""}`);
-  if (unstaged.length > 0) lines.push(`  unstaged (${unstaged.length}): ${unstaged.slice(0, 5).map(f => f.replace(/^(modified|deleted):\s*/, "")).join(", ")}${unstaged.length > 5 ? ` +${unstaged.length - 5} more` : ""}`);
-  if (untracked.length > 0) lines.push(`  untracked (${untracked.length}): ${untracked.slice(0, 5).join(", ")}${untracked.length > 5 ? ` +${untracked.length - 5} more` : ""}`);
+  const lines = ["git status", ...branch.map((b) => `  ${b}`)];
+  if (conflicts.length > 0) lines.push(pathList("conflicts", conflicts));
+  if (staged.length > 0) lines.push(pathList("staged", staged));
+  if (unstaged.length > 0) lines.push(pathList("unstaged", unstaged));
+  if (untracked.length > 0) lines.push(pathList("untracked", untracked));
 
   return { summary: lines.join("\n"), originalSize };
 };

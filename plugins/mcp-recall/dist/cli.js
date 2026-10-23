@@ -6930,20 +6930,38 @@ var gitLogHandler = (toolName, output) => {
     originalSize
   };
 };
-var gitStatusHandler = (toolName, output) => {
-  const stdout = extractStdout(output);
-  const originalSize = Buffer.byteLength(bashOutputText(output), "utf8");
-  if (!stdout.trim()) {
-    return { summary: "[git status \u2014 clean working tree]", originalSize };
+var MAX_STATUS_PATHS = 50;
+var CONFLICT_CODES = new Set(["DD", "AU", "UD", "UA", "DU", "AA", "UU"]);
+var LONG_CONFLICT = /^(both modified|both added|both deleted|added by us|added by them|deleted by us|deleted by them):\s*/;
+var LONG_ENTRY = /^(modified|new file|deleted|renamed|copied|typechange):\s*/;
+var BRANCH_LINE = /^(On branch |HEAD detached |Your branch |## )/;
+function parsePorcelain(line, parts) {
+  const m = line.match(/^([ MTADRCU?!])([ MTADRCU?!]) (.+)$/);
+  if (!m)
+    return false;
+  const [, x, y, path] = m;
+  if (CONFLICT_CODES.has(x + y))
+    parts.conflicts.push(`${x}${y} ${path}`);
+  else if (x === "?")
+    parts.untracked.push(path);
+  else if (x !== "!") {
+    if (x !== " ")
+      parts.staged.push(`${x} ${path}`);
+    if (y !== " ")
+      parts.unstaged.push(`${y} ${path}`);
   }
-  const staged = [];
-  const unstaged = [];
-  const untracked = [];
-  const conflicts = [];
+  return true;
+}
+function parseStatus(stdout) {
+  const parts = { branch: [], staged: [], unstaged: [], untracked: [], conflicts: [] };
   let section = null;
   for (const line of stdout.split(`
 `)) {
     const trimmed = line.trim();
+    if (BRANCH_LINE.test(trimmed)) {
+      parts.branch.push(trimmed);
+      continue;
+    }
     if (trimmed.startsWith("Changes to be committed")) {
       section = "staged";
       continue;
@@ -6956,45 +6974,44 @@ var gitStatusHandler = (toolName, output) => {
       section = "untracked";
       continue;
     }
-    if (trimmed.startsWith("both modified") || trimmed.startsWith("both added")) {
-      conflicts.push(trimmed);
+    if (trimmed.startsWith("Unmerged paths")) {
+      section = "unmerged";
       continue;
     }
-    if (!trimmed || trimmed.startsWith("(") || trimmed.startsWith("no changes"))
+    if (!trimmed || trimmed.startsWith("(") || trimmed.startsWith("no changes") || trimmed.startsWith("nothing"))
       continue;
-    if (trimmed.startsWith("On branch") || trimmed.startsWith("HEAD") || trimmed.startsWith("Your branch") || trimmed.startsWith("nothing"))
+    if (!line.startsWith("\t") && parsePorcelain(line, parts))
       continue;
-    const porcelain = line.match(/^([MADRCU?!]{1,2})\s+(.+)$/);
-    if (porcelain) {
-      const [, code, file] = porcelain;
-      if (code.startsWith("?"))
-        untracked.push(file);
-      else if (code[0] !== " " && code[0] !== "?")
-        staged.push(`${code[0]} ${file}`);
-      if (code[1] && code[1] !== " " && code[1] !== "?")
-        unstaged.push(`${code[1]} ${file}`);
-      continue;
-    }
-    if (section === "staged" && trimmed.match(/^(modified|new file|deleted|renamed):/)) {
-      staged.push(trimmed);
-    } else if (section === "unstaged" && trimmed.match(/^(modified|deleted):/)) {
-      unstaged.push(trimmed);
-    } else if (section === "untracked" && trimmed && !trimmed.startsWith("(")) {
-      untracked.push(trimmed);
-    }
+    if (LONG_CONFLICT.test(trimmed))
+      parts.conflicts.push(trimmed.replace(LONG_CONFLICT, ""));
+    else if ((section === "staged" || section === "unstaged") && LONG_ENTRY.test(trimmed))
+      parts[section].push(trimmed.replace(LONG_ENTRY, ""));
+    else if (section === "untracked")
+      parts.untracked.push(trimmed);
   }
+  return parts;
+}
+var pathList = (label, paths) => `  ${label} (${paths.length}): ${paths.slice(0, MAX_STATUS_PATHS).join(", ")}${paths.length > MAX_STATUS_PATHS ? ` +${paths.length - MAX_STATUS_PATHS} more` : ""}`;
+var gitStatusHandler = (toolName, output) => {
+  const stdout = extractStdout(output);
+  const originalSize = Buffer.byteLength(bashOutputText(output), "utf8");
+  if (!stdout.trim()) {
+    return { summary: "[git status \u2014 clean working tree]", originalSize };
+  }
+  const parts = parseStatus(stdout);
+  const { branch, staged, unstaged, untracked, conflicts } = parts;
   if (staged.length === 0 && unstaged.length === 0 && untracked.length === 0 && conflicts.length === 0) {
     return shellHandler(toolName, output);
   }
-  const lines = ["git status"];
+  const lines = ["git status", ...branch.map((b) => `  ${b}`)];
   if (conflicts.length > 0)
-    lines.push(`  conflicts (${conflicts.length}): ${conflicts.slice(0, 5).join(", ")}`);
+    lines.push(pathList("conflicts", conflicts));
   if (staged.length > 0)
-    lines.push(`  staged (${staged.length}): ${staged.slice(0, 5).map((f) => f.replace(/^(modified|new file|deleted|renamed):\s*/, "")).join(", ")}${staged.length > 5 ? ` +${staged.length - 5} more` : ""}`);
+    lines.push(pathList("staged", staged));
   if (unstaged.length > 0)
-    lines.push(`  unstaged (${unstaged.length}): ${unstaged.slice(0, 5).map((f) => f.replace(/^(modified|deleted):\s*/, "")).join(", ")}${unstaged.length > 5 ? ` +${unstaged.length - 5} more` : ""}`);
+    lines.push(pathList("unstaged", unstaged));
   if (untracked.length > 0)
-    lines.push(`  untracked (${untracked.length}): ${untracked.slice(0, 5).join(", ")}${untracked.length > 5 ? ` +${untracked.length - 5} more` : ""}`);
+    lines.push(pathList("untracked", untracked));
   return { summary: lines.join(`
 `), originalSize };
 };
