@@ -44,6 +44,10 @@ The pre-commit hook (`bun install` wires it automatically) detects staged `src/`
 - Call `resetConfig()` in `afterEach` for config tests to prevent cache bleed.
 - Use `":memory:"` for DB tests and call `closeDb()` in `afterEach`.
 
+### Judging a compression change
+
+Bytes saved rewards dropping content, so judge a change to what Claude receives with `bun run fidelity` as well (#352). It replays the Bash results in your transcripts and scores how much of what Claude went on to use each summary still contains, beside bytes saved, per command family. It prints totals only. To compare two revisions, check each out in a worktree and pass `--root <worktree>`; pass `--rtk <path>` to include rtk. The run fails if its controls do: pass-through must score 100% and the first line alone must score low.
+
 ## Error contract
 
 mcp-recall must never break a tool call under any failure condition. Every new code path that can fail must degrade gracefully to the original uncompressed output. See the [Error contract](README.md#error-contract) in the README.
