@@ -71,7 +71,7 @@ Release-morning steps:
 2. Open the release PR: bump `package.json` and both `plugin.json` files, date the `CHANGELOG.md` section, rebuild.
 3. After it merges, create the GitHub release `v<version>` (`gh release create --target` needs the full SHA). That runs `publish.yml`, which checks the tag matches `package.json`, stages the package on npm and attaches the binaries plus `SHA256SUMS`.
 4. Approve the staged version with 2FA: `npm stage list mcp-recall`, then `npm stage approve <stage-id>`, or approve it on npmjs.com. Nothing reaches npm until then. CI cannot approve, and the trusted publisher is stage-only, so CI cannot publish directly either.
-5. Verify from a real download: the npm package from a clean project, and a binary from the release page.
+5. Verify from a real download: `gh workflow run verify-release.yml`. On each platform's own runner it downloads the release's binaries and checks them against `SHA256SUMS`, runs install Option D and the binary checks, and tests the macOS Gatekeeper workaround. It also installs the npm package in a clean project and checks its provenance. Run it after approval, since the npm job fails until the version is live.
 
 ## Contributing a profile
 
