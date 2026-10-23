@@ -25,10 +25,11 @@
  * config, history and recall store are neither read nor written.
  */
 import { spawnSync } from "child_process";
-import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, existsSync } from "fs";
+import { mkdtempSync, readFileSync, rmSync } from "fs";
 import { homedir, tmpdir } from "os";
 import { join } from "path";
 import { FIXTURES, fmt, summarize } from "./benchmark";
+import { FAMILIES, loadHook, recordedBash } from "./transcripts";
 
 const args = process.argv.slice(2);
 const opt = (name: string): string | undefined => {
@@ -62,72 +63,6 @@ function compareFixtures(): void {
   }
 }
 
-// Command families rtk has a stdin filter for, matched on the normalised command.
-const FAMILIES: [RegExp, string][] = [
-  [/^(grep|egrep|rg|git\s+grep)\s/, "grep"], [/^find\s/, "find"], [/^git\s+log\b/, "git-log"],
-  [/^git\s+(diff|show)\b/, "git-diff"], [/^git\s+status\b/, "git-status"],
-  [/^(journalctl|docker\s+logs|kubectl\s+logs)\b/, "log"], [/^(pytest|python3?\s+-m\s+pytest|uv\s+run\s+pytest)\b/, "pytest"],
-  [/^go\s+test\b/, "go-test"], [/^cargo\s+test\b/, "cargo-test"], [/^(npx\s+)?tsc\b/, "tsc"], [/^(npx\s+)?vitest\b/, "vitest"],
-];
-
-function* transcriptFiles(dir: string): Generator<string> {
-  for (const n of readdirSync(dir)) {
-    const p = join(dir, n);
-    if (statSync(p).isDirectory()) yield* transcriptFiles(p);
-    else if (n.endsWith(".jsonl")) yield p;
-  }
-}
-
-interface Recorded { command: string; stdout: string; stderr: string }
-
-/** Every Bash result in the transcripts, once each, minus those the hook had already compressed. */
-function recordedBash(dir: string): { calls: Recorded[]; compressed: number } {
-  const calls: Recorded[] = [];
-  const seen = new Set<string>();
-  let compressed = 0;
-  for (const file of transcriptFiles(dir)) {
-    const uses = new Map<string, string>();
-    for (const line of readFileSync(file, "utf8").split("\n")) {
-      let d: any;
-      try { d = JSON.parse(line); } catch { continue; }
-      for (const b of Array.isArray(d?.message?.content) ? d.message.content : []) {
-        if (b.type === "tool_use" && b.name === "Bash" && typeof b.input?.command === "string") uses.set(b.id, b.input.command);
-        // A subagent transcript and its parent can both hold one call.
-        if (b.type !== "tool_result" || !uses.has(b.tool_use_id) || seen.has(b.tool_use_id)) continue;
-        seen.add(b.tool_use_id);
-        const r = d.toolUseResult;
-        if (typeof r?.stdout !== "string") continue;
-        if (/^\[recall:recall_[0-9a-f]+/.test(r.stdout)) { compressed++; continue; }
-        const persisted = typeof r.persistedOutputPath === "string" && existsSync(r.persistedOutputPath);
-        calls.push({ command: uses.get(b.tool_use_id)!, stdout: persisted ? readFileSync(r.persistedOutputPath, "utf8") : r.stdout, stderr: persisted ? "" : String(r.stderr ?? "") });
-      }
-    }
-  }
-  return { calls, compressed };
-}
-
-/** mcp-recall's PostToolUse hook, writing to a throwaway store and config. */
-async function loadHook() {
-  // Set before the hook module loads, which reads them once.
-  const dbPath = join(scratch, "store.db");
-  process.env.RECALL_DB_PATH = dbPath;
-  process.env.RECALL_CONFIG_PATH = join(scratch, "config.toml");
-  writeFileSync(process.env.RECALL_CONFIG_PATH, "[store]\nmax_size_mb = 100000\n");
-  const { handlePostToolUse } = await import("../src/hooks/post-tool-use");
-  const { getDb } = await import("../src/db/index");
-  return {
-    /** What Claude receives for `command`'s output, and whether a row with its body was stored. */
-    deliver(command: string, stdout: string, stderr: string): { delivered: string; stored: boolean; body: boolean } {
-      const r: any = handlePostToolUse(JSON.stringify({ session_id: "compare-rtk", cwd: scratch, hook_event_name: "PostToolUse", tool_name: "Bash", tool_input: { command }, tool_response: { stdout, stderr, interrupted: false, isImage: false } }));
-      const replaced = r?.hookSpecificOutput?.updatedToolOutput;
-      const delivered = replaced && typeof replaced === "object" ? String(replaced.stdout ?? "") : stderr ? `${stdout}\n${stderr}` : stdout;
-      const id = delivered.match(/^\[recall:(recall_[0-9a-f]+)/)?.[1];
-      const row = id ? (getDb(dbPath).query("SELECT full_retained FROM stored_outputs WHERE id = ?").get(id) as { full_retained: number } | null) : null;
-      return { delivered, stored: replaced !== undefined, body: row?.full_retained === 1 };
-    },
-  };
-}
-
 // Commands run by --both. A pinned commit keeps the git rows stable across checkouts.
 const BOTH = [
   "git status",
@@ -143,7 +78,7 @@ const BOTH = [
 const HINT_RE = /rtk recall [0-9a-f]{6,}|\[full [a-z ]+: rtk [^\]]+\]/g;
 
 async function compareBoth(): Promise<void> {
-  const hook = await loadHook();
+  const hook = await loadHook(scratch, "compare-rtk");
   const repo = join(import.meta.dir, "..");
   // rtk's rewrite names `rtk`, so the rewritten command finds the binary on PATH.
   // A bare `rtk` is on PATH already; prepending its dirname would add `.`.
@@ -166,7 +101,7 @@ async function compareBoth(): Promise<void> {
 }
 
 async function compareTranscripts(): Promise<void> {
-  const hook = await loadHook();
+  const hook = await loadHook(scratch, "compare-rtk");
   const { normalizeCommand, isCompoundCommand } = await import("../src/handlers/bash");
 
   const { calls, compressed } = recordedBash(opt("--projects") ?? join(homedir(), ".claude/projects"));
