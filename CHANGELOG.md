@@ -10,7 +10,7 @@ All notable changes to mcp-recall are documented here. Format based on [Keep a C
 
 ### Fixed
 
-- **1.18.0, published.** 1.18.0 never reached npm: its publish failed
+- **1.18.0's release, retried as 1.18.1.** 1.18.0 never reached npm: its publish failed
   (E404) because npm no longer accepts tokens that bypass 2FA, so its
   release page has no binaries either. 1.18.1 carries the same code; the
   1.18.0 notes below describe what it contains.
