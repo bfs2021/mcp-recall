@@ -6,6 +6,17 @@ All notable changes to mcp-recall are documented here. Format based on [Keep a C
 
 ## [Unreleased]
 
+### Fixed
+
+- **`git status` summaries keep the paths Claude acts on** (#387). In short
+  format, an entry whose staged column is blank (` M file`, the most common)
+  was dropped, so a summary could list one untracked directory over a tree
+  with a dozen modified files. Every porcelain entry is now parsed, conflicts
+  by their status code; up to 50 paths per category are listed instead of 5;
+  and the branch, upstream and ahead/behind lines are kept. On one developer's
+  transcripts, `bun run fidelity` puts `git status` recall at 100%, from
+  85.5%; the cost is a lower reduction on that command, 15.6% from 17.0%.
+
 ## [1.18.1] — 2026-10-22
 
 ### Fixed

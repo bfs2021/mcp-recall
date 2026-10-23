@@ -2309,6 +2309,58 @@ describe("gitStatusHandler", () => {
     const { originalSize } = gitStatusHandler("Bash", output);
     expect(originalSize).toBeGreaterThan(0);
   });
+
+  const status = (stdout: string) => gitStatusHandler("Bash", { stdout, stderr: "", exit_code: 0 }).summary;
+
+  it("keeps a short-format entry whose staged column is blank", () => {
+    expect(status(GIT_STATUS_SHORT)).toContain("unstaged (1): M README.md");
+  });
+
+  it("lists every entry when all short-format lines start with a space", () => {
+    const summary = status(" M apps/admin/src/api.ts\n M apps/api/src/db/schema.ts\n D apps/old.ts\n?? tasks/\n");
+    expect(summary).toContain("unstaged (3): M apps/admin/src/api.ts, M apps/api/src/db/schema.ts, D apps/old.ts");
+    expect(summary).toContain("untracked (1): tasks/");
+  });
+
+  it("keeps the -sb branch line", () => {
+    expect(status("## feat/x...origin/feat/x [ahead 2]\n M a.ts\n")).toContain("## feat/x...origin/feat/x [ahead 2]");
+  });
+
+  it("keeps the branch and tracking lines (long format)", () => {
+    const summary = status(GIT_STATUS_LONG);
+    expect(summary).toContain("On branch feat/foo");
+    expect(summary).toContain("Your branch is up to date with 'origin/feat/foo'.");
+  });
+
+  it("keeps a detached HEAD line", () => {
+    expect(status("HEAD detached at 1a2b3c4\nChanges not staged for commit:\n\tmodified:   a.ts\n")).toContain("HEAD detached at 1a2b3c4");
+  });
+
+  it("lists up to 50 paths per category, then counts the rest", () => {
+    const files = Array.from({ length: 60 }, (_, i) => `?? src/file-${i}.ts`).join("\n");
+    const summary = status(files);
+    expect(summary).toContain("src/file-49.ts");
+    expect(summary).not.toContain("src/file-50.ts");
+    expect(summary).toContain("+10 more");
+  });
+
+  it("reports every conflict kind, short and long", () => {
+    expect(status("UU src/a.ts\nAA src/b.ts\nDU src/c.ts\n M src/d.ts\n")).toContain("conflicts (3): UU src/a.ts, AA src/b.ts, DU src/c.ts");
+    const long = status("Unmerged paths:\n\tboth modified:   src/a.ts\n\tdeleted by them: src/b.ts\n\tadded by us:     src/c.ts\n");
+    expect(long).toContain("conflicts (3)");
+    expect(long).toContain("src/b.ts");
+    expect(long).toContain("src/c.ts");
+  });
+
+  it("keeps unstaged renames and type changes (long format)", () => {
+    const summary = status("Changes not staged for commit:\n\trenamed:    old.ts -> new.ts\n\ttypechange: link.ts\n");
+    expect(summary).toContain("old.ts -> new.ts");
+    expect(summary).toContain("link.ts");
+  });
+
+  it("keeps both paths of a short-format rename", () => {
+    expect(status("R  src/old.ts -> src/new.ts\n")).toContain("src/old.ts -> src/new.ts");
+  });
 });
 
 // ---------------------------------------------------------------------------
