@@ -6,6 +6,19 @@ All notable changes to mcp-recall are documented here. Format based on [Keep a C
 
 ## [Unreleased]
 
+### Added
+
+- **A rerunnable quality benchmark** (#390, first part). `bun run quality`
+  runs a checked-in corpus through mcp-recall's real hook and three baselines
+  on the same bytes: the head cut to the same size, the first line alone, and
+  pass-through. For each command family it scores the facts kept (paths,
+  changed lines, commits, error lines, merge state), extracted from the raw
+  output by rules that share no code with the handlers. It also counts false
+  claims. The run fails if pass-through loses a fact, or if the first line is
+  not below mcp-recall in every family. CI fails when `benchmark/results.md`
+  differs from what the corpus produces. The corpus is scripted git cases so
+  far; more command families and public samples follow.
+
 ### Changed
 
 - **The bench reports facts kept beside bytes saved.** `bun run bench` now
